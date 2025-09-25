@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 # Configuración de la app
 # =========================
 st.set_page_config(page_title="FinTech Data Analytics", page_icon="📈", layout="wide")
-st.title("📊 FinTech Data Analytics – Semanas 2–5 (Dashboard + Indicadores + Predicción + Walk-Forward + Alertas)")
+st.title("📊 FinTech Data Analytics – (Dashboard + Indicadores + Predicción + Walk-Forward + Alertas)")
 
 
 # =========================
