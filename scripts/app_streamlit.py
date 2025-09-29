@@ -23,18 +23,17 @@ from statsmodels.tsa.arima.model import ARIMA
 # Exportables
 from fpdf import FPDF
 import matplotlib.pyplot as plt
+from pandas_datareader import data as pdr
 
 
-# =========================
+
 # Configuración de la app
-# =========================
 st.set_page_config(page_title="FinTech Data Analytics", page_icon="📈", layout="wide")
 st.title("📊 FinTech Data Analytics – (Dashboard + Indicadores + Predicción + Walk-Forward + Alertas)")
 
 
-# =========================
-# Helpers export/PDF (latin-1 safe)
-# =========================
+
+# Helpers export/PDF 
 def _ascii_safe(s: str) -> str:
     """Convierte a string y reemplaza símbolos fuera de latin-1 por equivalentes ASCII."""
     s = str(s)
@@ -140,7 +139,7 @@ def export_pdf_bytes(df: pd.DataFrame, price_col: str, sma_windows, bb_cols, tit
             line = f"- {k}: {v}"
         pdf.cell(0, 7, _ascii_safe(line), ln=True)
 
-    # Imagen: FPDF no inserta BytesIO directo → guardamos temporal
+    # Imagen
     tmp_path = Path("data/processed/_tmp_plot.png")
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
     with open(tmp_path, "wb") as f:
@@ -153,9 +152,7 @@ def export_pdf_bytes(df: pd.DataFrame, price_col: str, sma_windows, bb_cols, tit
     return BytesIO(pdf_bytes)
 
 
-# =========================
 # Notificaciones (Email)
-# =========================
 def _get_secret(key: str, default=None):
     # 1) Variables de entorno, 2) st.secrets (Streamlit Cloud), 3) default
     v = os.getenv(key, None)
@@ -190,9 +187,8 @@ def send_email(subject: str, body: str, to_email: str) -> str:
         return f"Error email: {e}"
 
 
-# =========================
+
 # Utilidades de normalización
-# =========================
 def normalize_yahoo_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normaliza DataFrames de yfinance/CSV a columnas estándar:
@@ -285,6 +281,57 @@ def load_from_yahoo(tickers: List[str], period: str, interval: str) -> dict:
 
     return out
 
+# --- Fallback: Stooq via pandas-datareader ---
+
+
+def _period_to_days(period: str) -> int:
+    # '1mo','3mo','6mo','1y','2y','5y','max'
+    mapping = {
+        "1mo": 30, "3mo": 90, "6mo": 180,
+        "1y": 365, "2y": 730, "5y": 1825
+    }
+    return mapping.get(str(period).lower(), 365)
+
+def load_from_stooq(tickers: List[str], period: str, interval: str) -> dict:
+    """
+    Descarga precios diarios desde Stooq (solo '1d').
+    Ignora intervalos intradía/weekly y usa último N días.
+    """
+    out = {}
+    days = _period_to_days(period)
+    end = pd.Timestamp.utcnow().normalize()
+    start = end - pd.Timedelta(days=days)
+    for t in tickers:
+        try:
+            df = pdr.DataReader(t, "stooq", start=start, end=end)  # devuelve OHLCV con índice Date descendente
+            if df is None or df.empty:
+                continue
+            df = df.sort_index().reset_index()  # Date ascendente
+            df = df.rename(columns={
+                "Date": "Date",
+                "Open": "Open", "High": "High", "Low": "Low",
+                "Close": "Close", "Volume": "Volume"
+            })
+            # Stooq no trae Adj Close; copia Close
+            if "Adj Close" not in df.columns:
+                df["Adj Close"] = df["Close"]
+            out[t] = normalize_yahoo_df(df)
+        except Exception:
+            continue
+    return out
+
+def load_data_with_fallback(tickers: List[str], period: str, interval: str) -> dict:
+    """
+    1) Intenta Yahoo (yfinance)
+    2) Si falla / vacío, intenta Stooq (diario)
+    """
+    data = load_from_yahoo(tickers, period, interval)
+    if data:
+        return data
+    # Fallback: forzamos diario porque Stooq no soporta otros intervalos
+    return load_from_stooq(tickers, period, "1d")
+
+
 def pick_close_col(df: pd.DataFrame, prefer_adj=True) -> Optional[str]:
     """Devuelve 'Adj Close' si existe; si no, 'Close'."""
     cols = {c.lower(): c for c in df.columns}
@@ -298,9 +345,8 @@ def pick_close_col(df: pd.DataFrame, prefer_adj=True) -> Optional[str]:
     return None
 
 
-# =========================
+
 # Indicadores técnicos
-# =========================
 def compute_sma(df: pd.DataFrame, price_col: str, windows):
     for w in windows:
         df[f"SMA{int(w)}"] = df[price_col].rolling(int(w), min_periods=1).mean()
@@ -323,9 +369,8 @@ def stats_block(df: pd.DataFrame, price_col: str):
     c4.metric("VaR 95% (día)", f"{np.percentile(rets, 5):.3%}")
 
 
-# =========================
-# Predicción (Semana 4)
-# =========================
+
+# Predicción 
 def eval_metrics(y_true, y_pred):
     y_true = pd.Series(y_true).astype(float).values
     y_pred = pd.Series(y_pred).astype(float).values
@@ -419,7 +464,7 @@ def predict_arima(df: pd.DataFrame, price_col: str, horizon=7, backtest=30, use_
     return forecast_df, insample_df, (mae, rmse, mape), order
 
 
-# ==== Walk-forward backtest ====
+# Walk-forward backtest 
 def walk_forward_forecast(series: pd.Series, model_fn, splits=5, horizon=7):
     """
     series: pd.Series con índice Date y valores float (frecuencia diaria).
@@ -474,7 +519,7 @@ def linear_wrapper():
     return _fit
 
 
-# ==== Alertas (Semana 5) ====
+#  Alertas (Semana 5) 
 def daily_change_alert(df: pd.DataFrame, price_col: str, pct: float = 5.0):
     """Alerta si el último retorno diario supera +/-pct%."""
     if len(df) < 2:
@@ -509,9 +554,8 @@ def sma_cross_alert(df: pd.DataFrame, price_col: str, fast: int = 20, slow: int 
     return {"active": False, "type": "Cruce SMA", "message": "Sin cruce reciente", "severity": "info"}
 
 
-# =========================
+
 # Sidebar / Controles
-# =========================
 with st.sidebar:
     st.header("⚙️ Configuración")
     source = st.radio("Fuente de datos", ["Yahoo Finance", "Subir CSV"], index=0)
@@ -570,9 +614,8 @@ try:
 except Exception:
     SMA_WINDOWS = [20, 50]
 
-# =========================
 # Cargar datos
-# =========================
+
 data_dict = {}
 
 if source == "Yahoo Finance":
@@ -583,18 +626,19 @@ if source == "Yahoo Finance":
 
     if st.session_state['fetch_clicked']:
         tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-        data_dict = load_from_yahoo(tickers, period, interval)
+        data_dict = load_data_with_fallback(tickers, period, interval)  # ✅ con fallback
         if not data_dict:
             st.warning("No se descargaron datos. Revisa tickers / conexión.")
 else:
     if uploaded is not None:
         df = pd.read_csv(uploaded)
-        df = normalize_yahoo_df(df)
+        df = normalize_yahoo_df(df)  # ✅ corregido
         data_dict = {"CSV": df}
 
 if not data_dict:
     st.info("Carga un CSV o descarga datos desde Yahoo para comenzar.")
     st.stop()
+
 
 # Primer dataset como activo principal
 first_key = next(iter(data_dict.keys()))
@@ -602,13 +646,12 @@ df0 = data_dict[first_key]
 df0 = df0.loc[:, ~df0.columns.duplicated()]  # safety
 
 st.subheader("📄 Vista previa")
-st.dataframe(df0.head(30), width="stretch")
+st.dataframe(df0.head(30), use_container_width=True)
+
 
 st.subheader("📈 Visualización")
 
-# =========================
-# VISTAS
-# =========================
+# VISTAS=
 if chart_type == "Línea":
     price_col = pick_close_col(df0)
     if price_col is None:
@@ -831,7 +874,7 @@ if price_col_global:
                 st.error(f"No se pudo enviar email: {result}")
 
 
-# ==== Descargas (Excel / PDF) ====
+# ==== Descarga (Excel / PDF) ====
 if show_downloads:
     st.divider()
     st.subheader("⬇️ Exportar reporte (Excel / PDF)")
