@@ -23,7 +23,6 @@ from statsmodels.tsa.arima.model import ARIMA
 # Exportables
 from fpdf import FPDF
 import matplotlib.pyplot as plt
-from pandas_datareader import data as pdr
 
 
 
@@ -148,7 +147,12 @@ def export_pdf_bytes(df: pd.DataFrame, price_col: str, sma_windows, bb_cols, tit
     pdf.ln(4)
     pdf.image(str(tmp_path), x=10, w=190)
 
-    pdf_bytes = pdf.output(dest="S").encode("latin-1", "ignore")
+    out = pdf.output(dest="S")  # puede devolver bytes o str según la versión
+    if isinstance(out, (bytes, bytearray)):
+        pdf_bytes = bytes(out)
+    else:
+        pdf_bytes = out.encode("latin-1", "ignore")
+
     return BytesIO(pdf_bytes)
 
 
@@ -297,28 +301,36 @@ def load_from_stooq(tickers: List[str], period: str, interval: str) -> dict:
     Descarga precios diarios desde Stooq (solo '1d').
     Ignora intervalos intradía/weekly y usa último N días.
     """
+    # Importación perezosa para evitar romper en Python 3.12/3.13 (sin distutils)
+    try:
+        from pandas_datareader import data as pdr
+    except Exception as e:
+        # Si falla (p. ej. por distutils), deshabilita el fallback silenciosamente
+        print("Stooq fallback deshabilitado (pandas-datareader no disponible):", e)
+        return {}
+
     out = {}
     days = _period_to_days(period)
     end = pd.Timestamp.utcnow().normalize()
     start = end - pd.Timedelta(days=days)
     for t in tickers:
         try:
-            df = pdr.DataReader(t, "stooq", start=start, end=end)  # devuelve OHLCV con índice Date descendente
+            df = pdr.DataReader(t, "stooq", start=start, end=end)
             if df is None or df.empty:
                 continue
-            df = df.sort_index().reset_index()  # Date ascendente
+            df = df.sort_index().reset_index()
             df = df.rename(columns={
                 "Date": "Date",
                 "Open": "Open", "High": "High", "Low": "Low",
                 "Close": "Close", "Volume": "Volume"
             })
-            # Stooq no trae Adj Close; copia Close
             if "Adj Close" not in df.columns:
                 df["Adj Close"] = df["Close"]
             out[t] = normalize_yahoo_df(df)
         except Exception:
             continue
     return out
+
 
 def load_data_with_fallback(tickers: List[str], period: str, interval: str) -> dict:
     """
@@ -649,6 +661,7 @@ st.subheader("📄 Vista previa")
 st.dataframe(df0.head(30), use_container_width=True)
 
 
+
 st.subheader("📈 Visualización")
 
 # VISTAS=
@@ -780,7 +793,8 @@ elif chart_type == "Comparar varios (línea + correlación)":
             corr = rets.corr()
             figc = px.imshow(corr, text_auto=True, title="Matriz de correlación", aspect="auto", zmin=-1, zmax=1)
             st.plotly_chart(figc, use_container_width=True)
-            st.dataframe(corr.style.format("{:.2f}"), width="stretch")
+            st.dataframe(corr.style.format("{:.2f}"), use_container_width=True)
+
 
 elif chart_type == "Predicción 7 días (Regresión / ARIMA)":
     price_col = pick_close_col(df0)
@@ -833,7 +847,8 @@ elif chart_type == "Predicción 7 días (Regresión / ARIMA)":
             .format({"MAE": "{:.3f}", "RMSE": "{:.3f}", "MAPE (%)": "{:.2f}"})
             .highlight_min(subset=["MAE", "RMSE", "MAPE (%)"], color="#d4edda")
         )
-        st.dataframe(styler, width="stretch")
+        st.dataframe(styler, use_container_width=True)
+
         st.caption("Walk-forward: 5 folds, horizonte = "
                    f"{int(horizon)} días. Verde = mejor (menor) por métrica.")
 
